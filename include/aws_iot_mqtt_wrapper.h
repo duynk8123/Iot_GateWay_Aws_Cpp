@@ -27,7 +27,7 @@
 #include <thread>
 
 #include "logger.hpp"
-
+#include "backoff_manager.h"
 using namespace std;
 using namespace Aws::Crt;
 using namespace logger;
@@ -41,34 +41,48 @@ class AwsIotWsMqttClient
 {
 public:
     using MessageHandler = std::function<void(const std::string&, const std::string&)>;
-    
+
     AwsIotWsMqttClient(
         const std::string& endpoint,
         const std::string& region,
         const std::string& clientId,
         Logger* logger = nullptr);
-    bool WebsocketConfiguration();
-    bool SetupLifecycleCallback();
-    bool Build();
-    bool Connect();
+    void WebsocketConfiguration();
+    void SetupLifecycleCallback();
+    void Build();
+    void Connect();
     void Disconnect();
 
-    bool Publish(const std::string& topic,
+    void Publish(const std::string& topic,
                  const std::string& payload);
 
-    bool Subscribe(const std::string& topic);
-    bool UnSubcribe(const std::string& topic);
+    void Subscribe(const std::string& topic);
+    void UnSubcribe(const std::string& topic);
     
     void SetMessageHandler(MessageHandler handler);
 
+    void SetRetryPolicy(const RetryPolicy& p);
+
+    // Core private helpers
+    bool IsRetryableError(int errorCode);
+    void RetryConnect();          
 private:
+    /*private method*/
+    
+    
+    /*
+        SDK objects
+    */
     std::shared_ptr<Aws::Crt::Mqtt5::Mqtt5Client> m_client;
     std::unique_ptr<Aws::Iot::Mqtt5ClientBuilder> m_builder;
+    /*
+        Config
+    */
     std::string m_endpoint;
     std::string m_region;
     std::string m_clientId;
-
     Aws::Iot::WebsocketConfig m_websocketConfig;    
+
 
     std::promise<bool> m_connectionPromise;
     std::promise<void> m_stoppedPromise;
@@ -77,6 +91,11 @@ private:
     std::promise<void> m_unsubscribeFinishedPromise;
 
     MessageHandler m_messageHandler;
+    Logger* m_logger{nullptr};
 
-    Logger* m_logger;
+    //State machine & backoff manager variables
+    RetryPolicy m_retryPolicy;
+    BackoffManager m_backoffManager{m_retryPolicy};
+
+
 };

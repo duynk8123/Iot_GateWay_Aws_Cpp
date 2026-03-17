@@ -34,8 +34,7 @@ int main()
     mqtt.Publish("robot/status", "offline");
     while (true) 
     {
-        logger.LogInfo() << "Hello. This is app3" << getpid();
-        sleep(3);
+
     }
 
     return 0;

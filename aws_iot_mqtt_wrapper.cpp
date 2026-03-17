@@ -5,11 +5,17 @@ AwsIotWsMqttClient::AwsIotWsMqttClient(
     const std::string& region,
     const std::string& clientId,
     Logger* logger)
-: m_endpoint(endpoint), m_region(region), m_clientId(clientId),m_websocketConfig(Aws::Crt::String(region.c_str())),m_logger(logger)
+:   m_endpoint(endpoint),
+    m_region(region),
+    m_clientId(clientId),
+    m_websocketConfig(Aws::Crt::String(region.c_str())),
+    m_logger(logger),
+    m_retryPolicy(),
+    m_backoffManager(m_retryPolicy)
 {
 
 }
-bool AwsIotWsMqttClient::WebsocketConfiguration()
+void AwsIotWsMqttClient::WebsocketConfiguration()
 {
     // Create websocket configuration
 
@@ -26,10 +32,8 @@ bool AwsIotWsMqttClient::WebsocketConfiguration()
     Aws::Iot::WebsocketConfig websocketConfig(m_region.c_str(), provider);
 
     m_websocketConfig = std::move(websocketConfig);
-    return true;
-
 }
-bool AwsIotWsMqttClient::SetupLifecycleCallback()
+void AwsIotWsMqttClient::SetupLifecycleCallback()
 {
     // Create a Client using Mqtt5ClientBuilder
     m_logger->LogInfo() << "Start create a Client using Mqtt5ClientBuilder";
@@ -39,7 +43,7 @@ bool AwsIotWsMqttClient::SetupLifecycleCallback()
     if (!m_builder || !*m_builder)
     {
         m_logger->LogError() << "Failed to setup MQTT5 WS builder: " << ErrorDebugString(LastError());
-        return false;
+        return;
     }
     
     auto connectOptions =
@@ -92,6 +96,7 @@ bool AwsIotWsMqttClient::SetupLifecycleCallback()
         {
             m_logger->LogInfo() << "Lifecycle Connection Success with reason code: " << eventData.connAckPacket->getReasonCode();
             m_connectionPromise.set_value(true);
+            m_backoffManager.Reset();
         });
 
     // Callback for the lifecycle event Connection Failure
@@ -100,6 +105,13 @@ bool AwsIotWsMqttClient::SetupLifecycleCallback()
         {
             m_logger->LogError() << "Lifecycle Connection Failure with error: " << aws_error_debug_str(eventData.errorCode);
             m_connectionPromise.set_value(false);
+
+            if (!IsRetryableError(eventData.errorCode))
+            {
+                m_logger->LogError() << "Non-retryable error!";
+                return;
+            }
+            RetryConnect();
         });
 
     // Callback for the lifecycle event Connection get disconnected
@@ -115,10 +127,15 @@ bool AwsIotWsMqttClient::SetupLifecycleCallback()
                 
             }
             m_disconnectPromise.set_value();
+            if (!IsRetryableError(eventData.errorCode))
+            {
+                m_logger->LogError() << "Non-retryable error!";
+                return;
+            }
+            RetryConnect();
         });   
-    return true;
 }
-bool AwsIotWsMqttClient::Build()
+void AwsIotWsMqttClient::Build()
 {
     
     /* Create Mqtt5Client from the builder */
@@ -139,19 +156,17 @@ bool AwsIotWsMqttClient::Build()
     }
 
     m_client = std::move(client);
-    return true;
 }
 
-bool AwsIotWsMqttClient::Connect()
+void AwsIotWsMqttClient::Connect()
 {
-        m_logger->LogInfo() << "Starting MQTT5 WS client";
+    m_backoffManager.Reset();
+    m_logger->LogInfo() << "Starting MQTT5 WS client";
     m_client->Start();
-
-    return m_connectionPromise.get_future().get();
 }
 
 
-bool AwsIotWsMqttClient::Publish(
+void AwsIotWsMqttClient::Publish(
     const std::string& topic,
     const std::string& payload)
 {
@@ -189,11 +204,9 @@ bool AwsIotWsMqttClient::Publish(
             Aws::Crt::Mqtt5::QOS::AWS_MQTT5_QOS_AT_LEAST_ONCE);
     // Publish
     m_client->Publish(publish, onPublishComplete);
- 
-    return true;
 }
 // Create a subscription object, and add it to a subscribe packet
-bool AwsIotWsMqttClient::Subscribe(const std::string& topic)
+void AwsIotWsMqttClient::Subscribe(const std::string& topic)
 {
     /**
      * Subscribe
@@ -227,10 +240,9 @@ bool AwsIotWsMqttClient::Subscribe(const std::string& topic)
             Aws::Crt::DefaultAllocatorImplementation());
 
     subPacket->WithSubscription(std::move(subscription));
-
-    return m_client->Subscribe(subPacket, onSubAck);
+    m_client->Subscribe(subPacket, onSubAck);
 }
-bool AwsIotWsMqttClient::UnSubcribe(const std::string& topic)
+void AwsIotWsMqttClient::UnSubcribe(const std::string& topic)
 {
     /**
     * Unsubscribe from the topic.
@@ -242,7 +254,7 @@ bool AwsIotWsMqttClient::UnSubcribe(const std::string& topic)
         if (error_code != 0)
         {
             m_logger->LogError() << "Unsubscription failed with error code: " << error_code << ": " << aws_error_debug_str(error_code);
-             return;
+            return;
         }
         if (unsuback != nullptr)
         {
@@ -266,7 +278,6 @@ bool AwsIotWsMqttClient::UnSubcribe(const std::string& topic)
         // Wait for unsubscription to finish
        m_unsubscribeFinishedPromise.get_future().wait();
     }
-    return true;
 }
 void AwsIotWsMqttClient::Disconnect()
 {
@@ -282,4 +293,43 @@ void AwsIotWsMqttClient::Disconnect()
 void AwsIotWsMqttClient::SetMessageHandler(MessageHandler handler)
 {
     m_messageHandler = std::move(handler);
+}
+
+void AwsIotWsMqttClient::SetRetryPolicy(const RetryPolicy& p)
+{
+    m_retryPolicy = p;
+    m_backoffManager = BackoffManager{m_retryPolicy};
+}
+
+void AwsIotWsMqttClient::RetryConnect()
+{
+    auto delay = m_backoffManager.GetNextBackoffMs();
+
+    if (delay.count() < 0)
+    {
+        m_logger->LogError() << "Max retry reached. Stop reconnect.";
+        return;
+    }
+
+    std::thread([this, delay]()
+    {
+        std::this_thread::sleep_for(delay);
+
+        m_logger->LogInfo() << "Retrying connection...";
+        m_client->Start();
+
+    }).detach();
+}
+bool AwsIotWsMqttClient::IsRetryableError(int errorCode)
+{
+    switch (errorCode)
+    {
+        case AWS_IO_SOCKET_TIMEOUT:
+        case AWS_IO_SOCKET_CLOSED:
+        case AWS_ERROR_MQTT_TIMEOUT:
+            return true;
+
+        default:
+            return false;
+    }
 }
