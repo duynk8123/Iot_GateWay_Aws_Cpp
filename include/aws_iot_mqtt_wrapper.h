@@ -25,6 +25,7 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <ostream>
 
 #include "logger.hpp"
 #include "backoff_manager.h"
@@ -42,21 +43,54 @@ class AwsIotWsMqttClient
 public:
     using MessageHandler = std::function<void(const std::string&, const std::string&)>;
 
+    /*
+        CONNECTED
+        ↓
+        DISCONNECTED
+        ↓
+        RECONNECTING
+        ↓
+        CONNECTING
+        ↓
+        CONNECTED
+    */
+    enum class e_ConnectionState : uint8_t {
+        IDLE,          // Not started yet; no connection attempt in progress
+        CONNECTING,    // Currently attempting to establish a connection
+        CONNECTED,     // Successfully connected
+        RECONNECTING,  // Connection lost; attempting automatic reconnection
+        RECONNECTING_FAILED,
+        DISCONNECTED,  // Disconnected but still active in runtime (no auto-retry or waiting for command)
+        STOPPED        // Fully stopped; terminal state; no operations allowed until restarted
+    };
+    enum class e_error : uint8_t {
+        NOT_INITIAL,
+        WRONG_CTX,
+        NULL_PARAM,
+        NOT_SUPPORT,
+        OK
+    };
     AwsIotWsMqttClient(
         const std::string& endpoint,
         const std::string& region,
         const std::string& clientId,
         Logger* logger = nullptr);
+
     void WebsocketConfiguration();
-    void SetupLifecycleCallback();
+
+    e_error SetupLifecycleCallback();
+
     void Build();
-    void Connect();
+
+    e_error Connect();
+
     void Disconnect();
 
-    void Publish(const std::string& topic,
+    e_error Publish(const std::string& topic,
                  const std::string& payload);
 
     void Subscribe(const std::string& topic);
+
     void UnSubcribe(const std::string& topic);
     
     void SetMessageHandler(MessageHandler handler);
@@ -65,7 +99,11 @@ public:
 
     // Core private helpers
     bool IsRetryableError(int errorCode);
-    void RetryConnect();          
+
+    e_error RetryConnect();   
+    
+    static const char* ToString(e_ConnectionState s);
+
 private:
     /*private method*/
     
@@ -84,7 +122,7 @@ private:
     Aws::Iot::WebsocketConfig m_websocketConfig;    
 
 
-    std::promise<bool> m_connectionPromise;
+    // std::promise<bool> m_connectionPromise;
     std::promise<void> m_stoppedPromise;
     std::promise<void> m_disconnectPromise;
     std::promise<void> m_subscribeSuccess;
@@ -97,5 +135,6 @@ private:
     RetryPolicy m_retryPolicy;
     BackoffManager m_backoffManager{m_retryPolicy};
 
-
+    std::atomic<e_ConnectionState> m_ConnectionState{e_ConnectionState::IDLE};
 };
+std::ostream& operator<<(std::ostream& os, AwsIotWsMqttClient::e_ConnectionState s);

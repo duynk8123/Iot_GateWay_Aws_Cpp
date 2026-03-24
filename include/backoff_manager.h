@@ -1,5 +1,6 @@
 #include <chrono>
 #include <random>
+#include <iostream>
 struct RetryPolicy {
     /*
         maximum attemps (retry)
@@ -9,17 +10,16 @@ struct RetryPolicy {
         Exponential backoff : delay = base * 2^attempt
     */
     std::chrono::milliseconds base{500}; // 500ms
-    /*
-
-    */
     std::chrono::milliseconds maxDelay{30000}; // 30s
 };
 
+inline std::ostream& operator<<(std::ostream& os, const std::chrono::milliseconds& d) {
+    return os << d.count() << " ms";
+}
     /*
-
-    Giải thích:
-        client sẽ retry connect sau một khoảng thời gian (được random với hàm nextdelay sử dụng cơ chế Exponential backoff (tăng lượng thời gian delay))
-        Và để tránh trong cùng một khoảng thời gian delay mà nh client cùng connect thì để tránh nghẽn ta sử dụng thêm jitter
+    explain:
+        client will retryconnect after a period of time randomed with Exponential backoff mechanism 
+        and to avoid lots of client delay at the same time we use jitter 
     */
 
 class BackoffManager {
@@ -32,7 +32,7 @@ class BackoffManager {
         void Reset() { m_attempt = 0; }
 
         std::chrono::milliseconds GetNextBackoffMs() {
-            if (m_attempt != -1 && m_attempt >= m_policy.maxAttempts)
+            if (m_policy.maxAttempts != -1 && m_attempt >= m_policy.maxAttempts)
             {
                 return std::chrono::milliseconds(-1); //stop retry
             }

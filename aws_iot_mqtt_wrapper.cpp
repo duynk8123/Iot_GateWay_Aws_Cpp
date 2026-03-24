@@ -33,25 +33,35 @@ void AwsIotWsMqttClient::WebsocketConfiguration()
 
     m_websocketConfig = std::move(websocketConfig);
 }
-void AwsIotWsMqttClient::SetupLifecycleCallback()
+AwsIotWsMqttClient::e_error AwsIotWsMqttClient::SetupLifecycleCallback()
 {
+    /*local variables*/
+    e_error ret_value = AwsIotWsMqttClient::e_error::OK;
+
     // Create a Client using Mqtt5ClientBuilder
     m_logger->LogInfo() << "Start create a Client using Mqtt5ClientBuilder";
+
     m_builder = std::unique_ptr<Aws::Iot::Mqtt5ClientBuilder>(
         Aws::Iot::Mqtt5ClientBuilder::
         NewMqtt5ClientBuilderWithWebsocket(m_endpoint.c_str(), m_websocketConfig));
+
     if (!m_builder || !*m_builder)
     {
         m_logger->LogError() << "Failed to setup MQTT5 WS builder: " << ErrorDebugString(LastError());
-        return;
+        ret_value = AwsIotWsMqttClient::e_error::NULL_PARAM;
     }
-    
+
     auto connectOptions =
-        Aws::Crt::MakeShared<Aws::Crt::Mqtt5::ConnectPacket>(
-            Aws::Crt::DefaultAllocatorImplementation());
-    if (!connectOptions) {  
-        m_logger->LogError() << "DefaultAllocatorImplementation failed: " << ErrorDebugString(LastError());
-    }
+    Aws::Crt::MakeShared<Aws::Crt::Mqtt5::ConnectPacket>(
+        Aws::Crt::DefaultAllocatorImplementation());
+
+    if (!connectOptions) 
+        {  
+            m_logger->LogError() << "DefaultAllocatorImplementation failed: " << ErrorDebugString(LastError());
+            ret_value = AwsIotWsMqttClient::e_error::NULL_PARAM;
+        }
+
+
     connectOptions->WithClientId(m_clientId.c_str());
         
     m_builder->WithConnectOptions(connectOptions);
@@ -95,7 +105,12 @@ void AwsIotWsMqttClient::SetupLifecycleCallback()
         [this](const Mqtt5::OnConnectionSuccessEventData &eventData)
         {
             m_logger->LogInfo() << "Lifecycle Connection Success with reason code: " << eventData.connAckPacket->getReasonCode();
-            m_connectionPromise.set_value(true);
+            // m_connectionPromise.set_value(true);
+            /*
+                After jumping into this callback means that connection OK => CONNECTED
+                set connection state => CONNECTED
+            */
+            m_ConnectionState.store(AwsIotWsMqttClient::e_ConnectionState::CONNECTED);
             m_backoffManager.Reset();
         });
 
@@ -104,14 +119,17 @@ void AwsIotWsMqttClient::SetupLifecycleCallback()
         [this](const Mqtt5::OnConnectionFailureEventData &eventData)
         {
             m_logger->LogError() << "Lifecycle Connection Failure with error: " << aws_error_debug_str(eventData.errorCode);
-            m_connectionPromise.set_value(false);
-
-            if (!IsRetryableError(eventData.errorCode))
+            if (m_ConnectionState == AwsIotWsMqttClient::e_ConnectionState::CONNECTING || m_ConnectionState == AwsIotWsMqttClient::e_ConnectionState::CONNECTED)
             {
-                m_logger->LogError() << "Non-retryable error!";
-                return;
+                if (!IsRetryableError(eventData.errorCode))
+                    {
+                        m_logger->LogError() << "Non-retryable error!";
+                    }
+                else 
+                {
+                    RetryConnect();
+                }
             }
-            RetryConnect();
         });
 
     // Callback for the lifecycle event Connection get disconnected
@@ -124,16 +142,29 @@ void AwsIotWsMqttClient::SetupLifecycleCallback()
                 Mqtt5::DisconnectReasonCode reason_code = eventData.disconnectPacket->getReasonCode();
                 m_logger->LogInfo() << "Disconnection packet code: " << reason_code;
                 m_logger->LogInfo() << "Disconnection packet code: " << aws_error_debug_str(reason_code);
-                
             }
-            m_disconnectPromise.set_value();
-            if (!IsRetryableError(eventData.errorCode))
+            /*
+            Condition for set connection state into RECONNECTING
+                IDLE        : not permit 
+                CONNECTING  : OK
+                CONNECTED   : OK
+                RECONNECTING: not permit
+                DISCONNECTED: not permit
+                STOPPED     : not permit
+            */
+            if (m_ConnectionState == AwsIotWsMqttClient::e_ConnectionState::CONNECTING || m_ConnectionState == AwsIotWsMqttClient::e_ConnectionState::CONNECTED)
             {
-                m_logger->LogError() << "Non-retryable error!";
-                return;
+                if (!IsRetryableError(eventData.errorCode))
+                    {
+                        m_logger->LogError() << "Non-retryable error!";
+                    }
+                else 
+                {
+                    RetryConnect();
+                }
             }
-            RetryConnect();
         });   
+    return ret_value;
 }
 void AwsIotWsMqttClient::Build()
 {
@@ -158,52 +189,93 @@ void AwsIotWsMqttClient::Build()
     m_client = std::move(client);
 }
 
-void AwsIotWsMqttClient::Connect()
+AwsIotWsMqttClient::e_error AwsIotWsMqttClient::Connect()
 {
-    m_backoffManager.Reset();
+    /*local variables*/
+    e_error ret_value = AwsIotWsMqttClient::e_error::OK;
+    /*allow change IDLE => CONNECTING*/
+    e_ConnectionState expected_connection = AwsIotWsMqttClient::e_ConnectionState::IDLE;
+
+    if(!m_ConnectionState.compare_exchange_strong(expected_connection,AwsIotWsMqttClient::e_ConnectionState::CONNECTING))
+    {
+        /* state RECONNECTING is allowed */
+        if(m_ConnectionState.load() != AwsIotWsMqttClient::e_ConnectionState::RECONNECTING)
+        {
+            m_logger->LogWarn() << "Connect called in wrong state";
+            return AwsIotWsMqttClient::e_error::WRONG_CTX;
+        }
+        /*set state machine : CONNECTING*/
+        m_ConnectionState.store(AwsIotWsMqttClient::e_ConnectionState::CONNECTING);
+    }
+    if(expected_connection != AwsIotWsMqttClient::e_ConnectionState::RECONNECTING)
+    {
+        m_logger->LogInfo() << "Start Reset Backoff" ;
+        m_backoffManager.Reset();
+        m_logger->LogInfo() << "Reset Backoff OK" ;
+    }
+
     m_logger->LogInfo() << "Starting MQTT5 WS client";
+
     m_client->Start();
+    return ret_value;
 }
 
 
-void AwsIotWsMqttClient::Publish(
+AwsIotWsMqttClient::e_error AwsIotWsMqttClient::Publish(
     const std::string& topic,
     const std::string& payload)
 {
-    /**
-     * Publish to the topics
+    /*
+        check the topic is connected to cloud
     */
-    // Setup publish completion callback. The callback will get triggered when the publish completes (when
-    // the client received the PubAck from the server).
-    auto onPublishComplete = [this](int, std::shared_ptr<Aws::Crt::Mqtt5::PublishResult> result)
-    {
-        if (!result->wasSuccessful())
-        {
-            m_logger->LogError() << "Publish failed with error code: " << result->getErrorCode() << ": " << ErrorDebugString(result->getErrorCode());
-        }
-        else if (result != nullptr)
-        {
-            std::shared_ptr<Mqtt5::PubAckPacket> puback =
-                std::dynamic_pointer_cast<Mqtt5::PubAckPacket>(result->getAck());
+   AwsIotWsMqttClient::e_error ret_value = AwsIotWsMqttClient::e_error::OK;
 
-            m_logger->LogInfo() << "Publish succeeded with PubAck reason code: " << puback->getReasonCode();
+   if(m_ConnectionState.load() == AwsIotWsMqttClient::e_ConnectionState::CONNECTED)
+   {
+        /**
+         * Publish to the topics
+        */
+        // Setup publish completion callback. The callback will get triggered when the publish completes (when
+        // the client received the PubAck from the server).
+        auto onPublishComplete = [this](int, std::shared_ptr<Aws::Crt::Mqtt5::PublishResult> result)
+        {
+            if (!result->wasSuccessful())
+            {
+                m_logger->LogError() << "Publish failed with error code: " << result->getErrorCode() << ": " << ErrorDebugString(result->getErrorCode());
+            }
+            else if (result != nullptr)
+            {
+                std::shared_ptr<Mqtt5::PubAckPacket> puback =
+                    std::dynamic_pointer_cast<Mqtt5::PubAckPacket>(result->getAck());
+
+                m_logger->LogInfo() << "Publish succeeded with PubAck reason code: " << puback->getReasonCode();
+            }
+        };
+        //format JSON
+        String message = "\"" + Aws::Crt::String(payload.c_str()) + "\"";
+        Aws::Crt::ByteCursor cursor =
+            Aws::Crt::ByteCursorFromString(message);
+        
+        m_logger->LogInfo() << "Publishing message to topic '" << topic.c_str() << "': " << message.c_str();
+        // Create a publish packet
+        auto publish =
+            Aws::Crt::MakeShared<Aws::Crt::Mqtt5::PublishPacket>(
+                Aws::Crt::DefaultAllocatorImplementation(),
+                topic.c_str(),
+                cursor,
+                Aws::Crt::Mqtt5::QOS::AWS_MQTT5_QOS_AT_LEAST_ONCE);
+        // Publish
+        auto result = m_client->Publish(publish, onPublishComplete);
+        /*
+            maybe in some situations, turn off client's wifi => not retry 
+        */
+       if(!result)
+        {
+            m_logger->LogError() << "Publish failed" ;
+            RetryConnect(); 
         }
-    };
-    //format JSON
-    String message = "\"" + Aws::Crt::String(payload.c_str()) + "\"";
-    Aws::Crt::ByteCursor cursor =
-        Aws::Crt::ByteCursorFromString(message);
-    
-    m_logger->LogInfo() << "Publishing message to topic '" << topic.c_str() << "': " << message.c_str();
-    // Create a publish packet
-    auto publish =
-        Aws::Crt::MakeShared<Aws::Crt::Mqtt5::PublishPacket>(
-            Aws::Crt::DefaultAllocatorImplementation(),
-            topic.c_str(),
-            cursor,
-            Aws::Crt::Mqtt5::QOS::AWS_MQTT5_QOS_AT_LEAST_ONCE);
-    // Publish
-    m_client->Publish(publish, onPublishComplete);
+   } 
+    return ret_value;
 }
 // Create a subscription object, and add it to a subscribe packet
 void AwsIotWsMqttClient::Subscribe(const std::string& topic)
@@ -211,6 +283,7 @@ void AwsIotWsMqttClient::Subscribe(const std::string& topic)
     /**
      * Subscribe
      */
+
     // Setup the callback that will be triggered on receiveing SUBACK from the server
     m_logger->LogInfo() << "Subscribing to topic '" << topic.c_str() << "'";
 
@@ -300,30 +373,50 @@ void AwsIotWsMqttClient::SetRetryPolicy(const RetryPolicy& p)
     m_retryPolicy = p;
     m_backoffManager = BackoffManager{m_retryPolicy};
 }
-
-void AwsIotWsMqttClient::RetryConnect()
+/*
+    Action retry connect when disconnected after connected OK
+*/
+AwsIotWsMqttClient::e_error AwsIotWsMqttClient::RetryConnect()
 {
+    e_ConnectionState expected_connection = AwsIotWsMqttClient::e_ConnectionState::CONNECTING;
+
+    // allow change from CONNECTED to RECONNECTING
+    m_logger->LogInfo() << "Now state is " << m_ConnectionState.load();
+    if (!m_ConnectionState.compare_exchange_strong(expected_connection, AwsIotWsMqttClient::e_ConnectionState::RECONNECTING))
+    {
+        m_logger->LogWarn() << "Already reconnecting or invalid state";
+        return AwsIotWsMqttClient::e_error::WRONG_CTX;
+    }
+
     auto delay = m_backoffManager.GetNextBackoffMs();
 
     if (delay.count() < 0)
     {
         m_logger->LogError() << "Max retry reached. Stop reconnect.";
-        return;
+        return AwsIotWsMqttClient::e_error::NOT_SUPPORT;
     }
 
     std::thread([this, delay]()
     {
+        m_logger->LogInfo() << "Retrying connection in " << delay.count() << " ms";
+
         std::this_thread::sleep_for(delay);
 
-        m_logger->LogInfo() << "Retrying connection...";
-        m_client->Start();
+        Connect();
 
     }).detach();
+
+    return AwsIotWsMqttClient::e_error::OK;
 }
+/*
+    Determine whether an error is retryable.
+*/
 bool AwsIotWsMqttClient::IsRetryableError(int errorCode)
 {
     switch (errorCode)
     {
+        //test
+        case AWS_IO_DNS_INVALID_NAME:
         case AWS_IO_SOCKET_TIMEOUT:
         case AWS_IO_SOCKET_CLOSED:
         case AWS_ERROR_MQTT_TIMEOUT:
@@ -333,3 +426,25 @@ bool AwsIotWsMqttClient::IsRetryableError(int errorCode)
             return false;
     }
 }
+/*
+    print now context/state
+*/
+const char* AwsIotWsMqttClient::ToString(AwsIotWsMqttClient::e_ConnectionState s) {
+    switch (s) {
+    case AwsIotWsMqttClient::e_ConnectionState::IDLE:                return "IDLE";
+    case AwsIotWsMqttClient::e_ConnectionState::CONNECTING:          return "CONNECTING";
+    case AwsIotWsMqttClient::e_ConnectionState::CONNECTED:           return "CONNECTED";
+    case AwsIotWsMqttClient::e_ConnectionState::RECONNECTING:        return "RECONNECTING";
+    case AwsIotWsMqttClient::e_ConnectionState::RECONNECTING_FAILED: return "RECONNECTING_FAILED";
+    case AwsIotWsMqttClient::e_ConnectionState::DISCONNECTED:        return "DISCONNECTED";
+    case AwsIotWsMqttClient::e_ConnectionState::STOPPED:             return "STOPPED";
+    default:                                     return "UNKNOWN";
+    }
+}
+
+std::ostream& operator<<(std::ostream& os,
+    AwsIotWsMqttClient::e_ConnectionState s)
+{
+return os << AwsIotWsMqttClient::ToString(s);
+}
+

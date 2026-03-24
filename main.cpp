@@ -28,13 +28,13 @@ int main()
     //mqtt.Subscribe("robot/cmd");
 
     //publish lên cloud
-    mqtt.Publish("robot/status", "online");
-    mqtt.Publish("robot/status", "offline");
-    mqtt.Publish("robot/status", "online");
-    mqtt.Publish("robot/status", "offline");
     while (true) 
     {
-
+        //publish lên cloud
+        mqtt.Publish("robot/status", "online");
+        sleep(10);
+        mqtt.Publish("robot/status", "offline");
+        sleep(10);
     }
 
     return 0;
