@@ -1,7 +1,8 @@
+#pragma once
 #include <chrono>
 #include <random>
 #include <iostream>
-struct RetryPolicy {
+struct RetryConfig {
     /*
         maximum attemps (retry)
     */
@@ -24,8 +25,7 @@ inline std::ostream& operator<<(std::ostream& os, const std::chrono::millisecond
 
 class BackoffManager {
     public:
-        BackoffManager(const RetryPolicy& p)
-            : m_policy(p) {}
+        BackoffManager() = default;
         /*
             reset attempt => 0
         */
@@ -51,6 +51,6 @@ class BackoffManager {
         }
     
     private:
-        RetryPolicy m_policy;
+        RetryConfig m_policy;
         int m_attempt{0};
     };
