@@ -17,7 +17,7 @@ struct MqttEvent{
 
 /*
     callback ->push event
-    executor -> handle
+    executor -> handle event -> transition -> action
 */
 /*
     class contain event
@@ -39,7 +39,7 @@ public:
     {
         std::unique_lock<std::mutex> lock(m_mutex);
         /*
-            queue is emtpied => wait 
+            queue is emptied => wait 
             after pushing event => wake up 
         */ 
 

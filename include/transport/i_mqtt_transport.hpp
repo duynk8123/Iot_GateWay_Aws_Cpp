@@ -15,6 +15,5 @@ class IMqttTransport {
         virtual void Unsubscribe(const std::string&) = 0;
         virtual void SetOnConnected(OnConnected cb) = 0;
         virtual void SetOnDisconnected(OnDisconnected cb) = 0;
-
         virtual void SetLogger(std::shared_ptr<logger::Logger> logger) = 0;
     };

@@ -1,5 +1,4 @@
 #pragma once
-#include <atomic>
 #include <mutex>
 
 class ConnectionStateMachine
@@ -43,36 +42,44 @@ public:
         {
         case ConnectionState::IDLE:
             if (event == ConnectionEvent::CONNECT_REQUEST)
-                return Set(ConnectionState::CONNECTING);
+                m_state = ConnectionState::CONNECTING;
+                return true;
             break;
 
         case ConnectionState::CONNECTING:
             if (event == ConnectionEvent::CONNECT_SUCCESS)
-                return Set(ConnectionState::CONNECTED);
+                m_state = ConnectionState::CONNECTED;
+                return true;
             if (event == ConnectionEvent::CONNECT_FAIL)
-                return Set(ConnectionState::DISCONNECTED);
+                m_state =ConnectionState::DISCONNECTED;
+                return true;
             break;
 
         case ConnectionState::CONNECTED:
             if (event == ConnectionEvent::DISCONNECTED)
-                return Set(ConnectionState::DISCONNECTED);
+                m_state = ConnectionState::DISCONNECTED;
+                return true;
             if (event == ConnectionEvent::STOP_REQUEST)
-                return Set(ConnectionState::STOPPING);
+                m_state = ConnectionState::STOPPING;
+                return true;
             break;
 
         case ConnectionState::DISCONNECTED:
             if (event == ConnectionEvent::RETRY)
-                return Set(ConnectionState::RECONNECTING);
+                m_state = ConnectionState::RECONNECTING;
+                return true;
             break;
 
         case ConnectionState::RECONNECTING:
             if (event == ConnectionEvent::CONNECT_REQUEST)
-                return Set(ConnectionState::CONNECTING);
+                m_state = ConnectionState::CONNECTING;
+                return true;
             break;
 
         case ConnectionState::STOPPING:
             if (event == ConnectionEvent::STOPPED)
-                return Set(ConnectionState::STOPPED);
+                m_state = ConnectionState::STOPPED;
+                return true;
             break;
             
         default:
@@ -80,13 +87,6 @@ public:
         }
 
         return false; // invalid transition
-    }
-
-private:
-    bool Set(ConnectionState newState)
-    {
-        m_state=newState;
-        return true;
     }
 
 private:

@@ -4,10 +4,11 @@
 #include "backoff_manager.hpp"
 #include "i_mqtt_client.hpp"
 #include "i_mqtt_transport.hpp"
-#include "retry_policy_implement.hpp"
 #include "connection_mngr.hpp"
 #include "event_queue.hpp"
 #include "logger.hpp"
+#include <aws/iotshadow/V2ErrorResponse.h>
+
 using namespace logger;
 
 class MqttClient : public IMqttClient , public std::enable_shared_from_this<MqttClient>
@@ -21,9 +22,8 @@ class MqttClient : public IMqttClient , public std::enable_shared_from_this<Mqtt
         void Init() override{
             //Init queue and executor
             m_eventQueue = std::make_shared<EventQueue>();
+            
             m_executorEvent = std::make_shared<ExecutorEvent>();
-            //init retry policy
-            m_retryPolicy = std::make_shared<RetryPolicy>();
 
             m_executorEvent->SetQueue(m_eventQueue);
             
@@ -100,7 +100,7 @@ class MqttClient : public IMqttClient , public std::enable_shared_from_this<Mqtt
        
                        m_stateMachine.Transition(ConnectionStateMachine::ConnectionEvent::CONNECT_FAIL);
                        //check nullptr and error code is able to retry
-                       if (m_retryPolicy && m_retryPolicy->IsRetryable(e.error_code))
+                       if (IsRetryable(e.error_code))
                        {
                             ScheduleRetry();
                        }
@@ -153,10 +153,19 @@ class MqttClient : public IMqttClient , public std::enable_shared_from_this<Mqtt
                 }
             }).detach(); 
         }
+        bool IsRetryable(int error){
+            switch (error) {
+                case AWS_IO_DNS_INVALID_NAME:
+                case AWS_IO_SOCKET_TIMEOUT:
+                case AWS_IO_SOCKET_CLOSED:
+                    return true;
+                default:
+                    return false;
+            }
+        };
     private:
         std::shared_ptr<IMqttTransport> m_transport;
         ConnectionStateMachine m_stateMachine;
-        std::shared_ptr<RetryPolicy> m_retryPolicy;
         BackoffManager m_backoff;
         
         std::shared_ptr<EventQueue> m_eventQueue;
